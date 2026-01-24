@@ -1,0 +1,39 @@
+{
+  "name": "地圖標註系統",
+  "short_name": "地圖標註",
+  "description": "一個功能完整的地圖標註和追蹤系統",
+  "start_url": "/Map/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2196F3",
+  "orientation": "portrait-primary",
+  "scope": "/Map/",
+  "lang": "zh-TW",
+  "categories": ["navigation", "utilities"],
+  "icons": [
+    {
+      "src": "./TG.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./TG.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./TG.png",
+      "sizes": "384x384",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "permissions": [
+    "geolocation",
+    "notifications",
+    "background-sync"
+  ],
+  "prefer_related_applications": false
+}

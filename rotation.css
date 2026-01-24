@@ -1,0 +1,73 @@
+/* Map rotation visual layer */
+.map-container.map-rotated {
+  overflow: hidden;
+}
+
+.map-container.map-rotated #map {
+  transform: rotate(var(--map-rotation-deg, 0deg)) scale(var(--map-rotation-scale, 1));
+  transform-origin: 50% 50%;
+  transition: transform 200ms ease;
+  will-change: transform;
+}
+
+/* 讓 Leaflet 控制項與彈窗在地圖旋轉時保持正向與正常尺寸 */
+.map-container.map-rotated .leaflet-control-container,
+.map-container.map-rotated .leaflet-top,
+.map-container.map-rotated .leaflet-bottom,
+.map-container.map-rotated .leaflet-popup-pane,
+.map-container.map-rotated .leaflet-tooltip-pane {
+  transform: rotate(calc(-1 * var(--map-rotation-deg, 0deg))) scale(var(--inverse-map-rotation-scale, 1));
+  transform-origin: 50% 50%;
+}
+
+/* Rotate button placement */
+.rotate-btn {
+  position: fixed !important;
+  right: 12px;
+  top: 160px;
+  z-index: 10020; /* 高於其他浮動元素，避免被覆蓋 */
+  pointer-events: auto;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  min-width: 35.2px; /* 44 * 0.8 */
+  min-height: 35.2px; /* 44 * 0.8 */
+  width: 28.8px; /* 36 * 0.8 */
+  height: 28.8px; /* 36 * 0.8 */
+  background: rgba(255, 255, 255, 0.95);
+  border: 2px solid rgba(99, 102, 241, 0.3);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(10px);
+  color: #4a5568;
+}
+
+.rotate-btn:hover {
+  transform: translateY(-2px) scale(1.05);
+  box-shadow: 0 6px 20px rgba(99, 102, 241, 0.25);
+}
+
+.rotate-btn:active {
+  transform: translateY(-1px) scale(0.98);
+}
+
+.rotate-btn.active {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.45);
+}
+
+/* Ensure map uses dynamic viewport height when rotated/fullscreen */
+.map-container,
+.map-container.fullscreen {
+  height: 100dvh;
+  height: 100svh;
+  width: 100vw;
+}
+
+.map-container.fullscreen #map {
+  height: 100dvh;
+  height: 100svh;
+  width: 100vw;
+}
