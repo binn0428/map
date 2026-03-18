@@ -253,9 +253,16 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setShareError("");
     try {
       // 1. 確認目標 email 已註冊
-      const { data: reg, error: regErr } = await supabase
-        .from("registered_emails").select("email").eq("email", target).single();
-      if (regErr || !reg) throw new Error("找不到此 Email，請確認對方已註冊");
+      // 1. 確認目標 email 已註冊
+      // 改用 maybeSingle() 避免 RLS 阻擋跨帳號查詢時誤報錯誤
+      const { data: reg } = await supabase
+        .from("registered_emails").select("email").eq("email", target).maybeSingle();
+      if (!reg) {
+        // RLS 可能限制查 registered_emails；fallback 查 device_credentials
+        const { data: anyDev } = await supabase
+          .from("device_credentials").select("id").eq("user_id", target).limit(1).maybeSingle();
+        if (!anyDev) throw new Error("找不到此 Email，請確認對方已註冊");
+      }
 
       // 2. 確認未重複分享
       const { data: exists } = await supabase
