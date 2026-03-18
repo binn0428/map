@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import ReactDOM from "react-dom";
 import {
   MapContainer, TileLayer, Circle, Marker,
@@ -19,8 +19,7 @@ L.Icon.Default.mergeOptions({
   shadowUrl:     "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
 });
 
-/* ─── 自訂圖示 ─────────────────────────────── */
-// 藍色脈衝圓點：GPS 定位
+/* ─── 自訂圖示 ─── */
 const gpsIcon = L.divIcon({
   className: "",
   html: `<div style="width:16px;height:16px;background:#3b82f6;border:3px solid white;
@@ -28,35 +27,26 @@ const gpsIcon = L.divIcon({
     animation:gpsPulse 2s infinite ease-in-out"></div>
   <style>@keyframes gpsPulse{0%,100%{box-shadow:0 0 0 5px rgba(59,130,246,0.3)}
     50%{box-shadow:0 0 0 10px rgba(59,130,246,0.05)}}</style>`,
-  iconSize: [16, 16],
-  iconAnchor: [8, 8],
+  iconSize: [16, 16], iconAnchor: [8, 8],
 });
-
-// 橘色水滴：待確認地點
 const pendingIcon = L.divIcon({
   className: "",
   html: `<svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
     <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0z"
       fill="#f97316" stroke="white" stroke-width="2"/>
-    <circle cx="12" cy="12" r="4" fill="white"/>
-  </svg>`,
-  iconSize: [24, 32],
-  iconAnchor: [12, 32],
+    <circle cx="12" cy="12" r="4" fill="white"/></svg>`,
+  iconSize: [24, 32], iconAnchor: [12, 32],
 });
-
-// 綠色水滴：已儲存地點
 const savedIcon = L.divIcon({
   className: "",
   html: `<svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
     <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0z"
       fill="#22c55e" stroke="white" stroke-width="2"/>
-    <circle cx="12" cy="12" r="4" fill="white"/>
-  </svg>`,
-  iconSize: [24, 32],
-  iconAnchor: [12, 32],
+    <circle cx="12" cy="12" r="4" fill="white"/></svg>`,
+  iconSize: [24, 32], iconAnchor: [12, 32],
 });
 
-/* ─── 型別 ─────────────────────────────────── */
+/* ─── 型別 ─── */
 interface DeviceCredential {
   id: string;
   device_name: string;
@@ -71,7 +61,7 @@ interface SavedLocation {
   position: [number, number];
 }
 
-/* ─── 地圖子元件 ────────────────────────────── */
+/* ─── 地圖子元件 ─── */
 function FlyTo({ target }: { target: [number, number] | null }) {
   const map = useMap();
   useEffect(() => { if (target) map.flyTo(target, 18, { duration: 1.0 }); }, [target, map]);
@@ -108,57 +98,71 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [savedLocations, setSavedLocations]   = useState<SavedLocation[]>([]);
   const [activeLocIdx, setActiveLocIdx]       = useState(0);
 
-  // 新增地點命名彈窗
-  const [showNameModal, setShowNameModal]   = useState(false);
-  const [pendingName, setPendingName]       = useState("");
+  // 地點命名
+  const [showNameModal, setShowNameModal] = useState(false);
+  const [pendingName, setPendingName]     = useState("");
+
+  // 分享設備
+  const [showShareModal, setShowShareModal]   = useState(false);
+  const [shareEmail, setShareEmail]           = useState("");
+  const [shareLoading, setShareLoading]       = useState(false);
+  const [shareError, setShareError]           = useState("");
 
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
-  const shareRemaining = isOwnDevice
-    ? MAX_SHARES - (selectedDevice?.share_count ?? 0)
-    : null;
+  const shareRemaining = isOwnDevice ? MAX_SHARES - (selectedDevice?.share_count ?? 0) : null;
 
-  /* ── 取得設備 + 分享次數精確比對 ──────────────────────────────────────
-     規則：user_id 符合登入帳號，且比對 mqtt_user / mqtt_pass / device_name，
-     share_from 為空的那筆才是 owner row，count 才是分享次數             */
-  useEffect(() => {
-    (async () => {
-      try {
-        const { data, error } = await supabase
-          .from("device_credentials")
-          .select("id, device_name, mqtt_user, mqtt_pass, share_from, count")
-          .eq("user_id", email);
+  /* ── 取得設備 ── */
+  const fetchDevices = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from("device_credentials")
+        .select("id, device_name, mqtt_user, mqtt_pass, share_from, count")
+        .eq("user_id", email);
+      if (error) throw error;
+      const rows: any[] = data || [];
 
-        if (error) throw error;
-        const rows: any[] = data || [];
+      // 建立 owner count 查找表：key = mqtt_user|mqtt_pass|device_name
+      const ownerCountMap: Record<string, number> = {};
+      rows.forEach((r) => {
+        if (!r.share_from) {
+          ownerCountMap[`${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`] =
+            parseInt(String(r.count ?? 0), 10);
+        }
+      });
 
-        // 建立 owner 查找表：key = `${mqtt_user}|${mqtt_pass}|${device_name}`
-        const ownerCountMap: Record<string, number> = {};
-        rows.forEach((r) => {
-          if (!r.share_from) {
-            const key = `${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`;
-            ownerCountMap[key] = parseInt(String(r.count ?? 0), 10);
-          }
-        });
+      const mapped: DeviceCredential[] = rows.map((r) => ({
+        id: r.id,
+        device_name: r.device_name,
+        mqtt_user: r.mqtt_user,
+        mqtt_pass: r.mqtt_pass,
+        share_from: r.share_from ?? null,
+        share_count: ownerCountMap[`${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`]
+          ?? parseInt(String(r.count ?? 0), 10),
+      }));
 
-        const mapped: DeviceCredential[] = rows.map((r) => {
-          const key = `${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`;
-          return {
-            id: r.id,
-            device_name: r.device_name,
-            mqtt_user: r.mqtt_user,
-            mqtt_pass: r.mqtt_pass,
-            share_from: r.share_from ?? null,
-            // 無論 owner 或 shared，都查 owner row 的 count
-            share_count: ownerCountMap[key] ?? parseInt(String(r.count ?? 0), 10),
-          };
-        });
-
-        setDevices(mapped);
-        if (mapped.length) setSelectedDevice(mapped[0]);
-      } catch (err) { console.error("fetchDevices:", err); }
-      finally { setLoading(false); }
-    })();
+      setDevices(mapped);
+      if (mapped.length && !selectedDevice) setSelectedDevice(mapped[0]);
+    } catch (err) { console.error("fetchDevices:", err); }
+    finally { setLoading(false); }
   }, [email]);
+
+  useEffect(() => { fetchDevices(); }, [fetchDevices]);
+
+  /* ── 開啟頁面自動 GPS 定位 ── */
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    setGpsLoading(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const c: [number, number] = [pos.coords.latitude, pos.coords.longitude];
+        setUserPosition(c);
+        setFlyTarget(c);
+        setGpsLoading(false);
+      },
+      () => setGpsLoading(false),   // 靜默失敗，不顯示錯誤（自動定位）
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  }, []); // 只在 mount 時執行一次
 
   /* ── MQTT ── */
   const deviceId = selectedDevice?.id;
@@ -212,7 +216,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     );
   };
 
-  /* ── GPS ── */
+  /* ── 手動 GPS ── */
   const handleLocate = () => {
     if (!navigator.geolocation) { setGpsError("不支援 GPS"); return; }
     setGpsLoading(true); setGpsError(null);
@@ -229,6 +233,85 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     );
   };
 
+  /* ── 分享設備 ──────────────────────────────────────────────────────
+     邏輯（依截圖資料庫結構）：
+     1. 確認目標 email 存在於 registered_emails
+     2. 確認尚未分享給該 email（避免重複）
+     3. INSERT 新 row：user_id=目標email, 相同 mqtt_user/pass/device_name,
+        share_from=自己的email, count 同 owner row
+     4. UPDATE owner 的 count + 1
+     5. 重新 fetch 更新 UI                                             */
+  const handleShare = async () => {
+    if (!selectedDevice || !isOwnDevice) return;
+    const target = shareEmail.trim().toLowerCase();
+    if (!target) { setShareError("請輸入 Email"); return; }
+    if (target === email.toLowerCase()) { setShareError("不能分享給自己"); return; }
+    if ((shareRemaining ?? 0) <= 0) { setShareError("分享次數已用盡"); return; }
+
+    setShareLoading(true);
+    setShareError("");
+    try {
+      // 1. 確認目標 email 已註冊
+      const { data: reg, error: regErr } = await supabase
+        .from("registered_emails").select("email").eq("email", target).single();
+      if (regErr || !reg) throw new Error("找不到此 Email，請確認對方已註冊");
+
+      // 2. 確認未重複分享
+      const { data: exists } = await supabase
+        .from("device_credentials")
+        .select("id")
+        .eq("user_id", target)
+        .eq("device_name", selectedDevice.device_name)
+        .eq("mqtt_user", selectedDevice.mqtt_user ?? "")
+        .maybeSingle();
+      if (exists) throw new Error("已分享給此 Email");
+
+      // 3. 取得 owner row 的 id（share_from 為空的那筆）
+      const { data: ownerRow, error: ownerErr } = await supabase
+        .from("device_credentials")
+        .select("id, count")
+        .eq("user_id", email)
+        .eq("device_name", selectedDevice.device_name)
+        .eq("mqtt_user", selectedDevice.mqtt_user ?? "")
+        .is("share_from", null)
+        .single();
+      if (ownerErr || !ownerRow) throw new Error("找不到設備 owner 資料");
+
+      const currentCount = parseInt(String(ownerRow.count ?? 0), 10);
+
+      // 4. INSERT 分享 row
+      const { error: insertErr } = await supabase
+        .from("device_credentials")
+        .insert({
+          user_id:     target,
+          device_name: selectedDevice.device_name,
+          mqtt_user:   selectedDevice.mqtt_user,
+          mqtt_pass:   selectedDevice.mqtt_pass,
+          share_from:  email,
+          count:       currentCount + 1,
+        });
+      if (insertErr) throw insertErr;
+
+      // 5. UPDATE owner count + 1
+      const { error: updateErr } = await supabase
+        .from("device_credentials")
+        .update({ count: currentCount + 1 })
+        .eq("id", ownerRow.id);
+      if (updateErr) throw updateErr;
+
+      // 重新 fetch
+      await fetchDevices();
+
+      setShowShareModal(false);
+      setShareEmail("");
+      alert(`已成功分享「${selectedDevice.device_name}」給 ${target}`);
+    } catch (err: any) {
+      setShareError(err.message || "分享失敗");
+    } finally {
+      setShareLoading(false);
+    }
+  };
+
   /* ── 地點導航 ── */
   const nav = (dir: 1 | -1) => {
     if (!savedLocations.length) return;
@@ -236,7 +319,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setActiveLocIdx(i); setFlyTarget(savedLocations[i].position);
   };
 
-  /* ── 新增地點：先彈出命名視窗 ── */
+  /* ── 新增地點命名 ── */
   const openNameModal = () => {
     if (!pendingLocation) return;
     setPendingName(`地點 ${savedLocations.length + 1}`);
@@ -315,10 +398,14 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             </select>
             <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">▾</div>
           </div>
+
           {isOwnDevice && (
             <>
-              <button onClick={() => alert(`分享：${selectedDevice!.device_name}`)}
-                className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-blue-400 active:bg-blue-500/20">
+              {/* 分享按鈕：剩餘次數 > 0 才可按 */}
+              <button
+                onClick={() => { setShareEmail(""); setShareError(""); setShowShareModal(true); }}
+                disabled={(shareRemaining ?? 0) <= 0}
+                className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-blue-400 active:bg-blue-500/20 disabled:opacity-30 disabled:cursor-not-allowed">
                 <Share2 className="w-3.5 h-3.5" />
               </button>
               <button onClick={() => selectedDevice && handleDeleteDevice(selectedDevice)}
@@ -355,9 +442,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       </div>
 
       {/* ══ 地圖 ══ */}
-      {/* ⚠ 不要在此 div 加 overflow-hidden，會讓高倍縮放的 tile 消失 */}
       <div className="bg-slate-900 mx-3 rounded-xl border border-slate-800 mb-2">
-
         {/* 工具列 */}
         <div className="px-2.5 py-1.5 flex items-center justify-between">
           <span className="text-xs font-semibold text-slate-300">地點地圖</span>
@@ -396,6 +481,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               ? <span className="text-red-400">{gpsError}</span>
               : pendingLocation
               ? `📍 ${pendingLocation[0].toFixed(4)}, ${pendingLocation[1].toFixed(4)}`
+              : gpsLoading
+              ? "正在自動定位..."
               : userPosition
               ? `✅ ${userPosition[0].toFixed(4)}, ${userPosition[1].toFixed(4)}`
               : "點地圖選位置，或按 ⊕ GPS"}
@@ -408,40 +495,27 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           )}
         </div>
 
-        {/* 地圖本體：單獨加 overflow-hidden + rounded-b-xl */}
+        {/* 地圖本體 */}
         <div className="h-52 w-full overflow-hidden rounded-b-xl">
           <MapContainer
             center={userPosition || DEFAULT_CENTER}
-            zoom={17}
-            maxZoom={22}
+            zoom={17} maxZoom={22}
             zoomControl={false}
             style={{ height: "100%", width: "100%" }}
-            // preferCanvas 加速渲染
-            preferCanvas={false}
           >
             {isStreetView ? (
-              <TileLayer
-                key="street"
+              <TileLayer key="street"
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 attribution="&copy; OSM"
-                maxZoom={22}
-                maxNativeZoom={19}
-                keepBuffer={8}
-              />
+                maxZoom={22} maxNativeZoom={19} keepBuffer={8} />
             ) : (
-              <TileLayer
-                key="satellite"
+              <TileLayer key="satellite"
                 url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                 attribution="&copy; Esri"
-                maxZoom={22}
-                maxNativeZoom={19}  /* Esri 實際最高為 19，超過會放大插值 */
-                keepBuffer={8}
-                crossOrigin=""
-              />
+                maxZoom={22} maxNativeZoom={19} keepBuffer={8} crossOrigin="" />
             )}
             <FlyTo target={flyTarget} />
             <MapClickHandler onMapClick={setPendingLocation} />
-
             {userPosition && (
               <>
                 <Circle center={userPosition} radius={12}
@@ -456,7 +530,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           </MapContainer>
         </div>
 
-        {/* 地圖底部：儲存狀態 */}
         <div className="px-2.5 py-1.5 border-t border-slate-800">
           <p className="text-xs text-slate-400">
             {savedLocations.length > 0
@@ -474,7 +547,6 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           <MapPin className="w-4 h-4" />
           {pendingLocation ? "新增地點（輸入名稱）" : "新增地點（請先點選地圖）"}
         </button>
-
         {savedLocations.length > 0 && (
           <div className="mt-1.5 space-y-1">
             {savedLocations.map((loc, idx) => (
@@ -485,13 +557,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 <div className="flex items-center gap-1.5 min-w-0">
                   <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${idx === activeLocIdx ? "bg-purple-400" : "bg-slate-500"}`} />
                   <span className="text-slate-300 truncate">{loc.label}</span>
-                  <span className="text-slate-500 flex-shrink-0">
-                    {loc.position[0].toFixed(3)},{loc.position[1].toFixed(3)}
-                  </span>
+                  <span className="text-slate-500 flex-shrink-0">{loc.position[0].toFixed(3)},{loc.position[1].toFixed(3)}</span>
                 </div>
                 <div className="flex gap-3 ml-2 flex-shrink-0">
-                  <button onClick={() => { setActiveLocIdx(idx); setFlyTarget(loc.position); }}
-                    className="text-blue-400">前往</button>
+                  <button onClick={() => { setActiveLocIdx(idx); setFlyTarget(loc.position); }} className="text-blue-400">前往</button>
                   <button onClick={() => {
                     const upd = savedLocations.filter((_, i) => i !== idx);
                     setSavedLocations(upd);
@@ -504,7 +573,51 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         )}
       </div>
 
-      {/* ══ 命名地點 Modal ══ */}
+      {/* ══ 分享設備 Modal ══ */}
+      {showShareModal && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowShareModal(false)}>
+            <div className="bg-slate-900 border-t border-blue-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-0.5">分享設備</h3>
+              <p className="text-xs text-slate-500 mb-3">
+                {selectedDevice?.device_name}・剩餘 {shareRemaining}/{MAX_SHARES} 次
+              </p>
+              {shareError && (
+                <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 mb-3">
+                  {shareError}
+                </p>
+              )}
+              <label className="block text-xs text-slate-400 mb-1">對方的 Email（需已註冊）</label>
+              <input
+                type="email"
+                value={shareEmail}
+                onChange={(e) => setShareEmail(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleShare()}
+                placeholder="example@email.com"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500 mb-3"
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button onClick={() => setShowShareModal(false)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                  取消
+                </button>
+                <button onClick={handleShare} disabled={shareLoading}
+                  className="flex-1 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-bold active:bg-blue-700 flex items-center justify-center gap-2">
+                  {shareLoading
+                    ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    : <><Share2 className="w-4 h-4" />確認分享</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 地點命名 Modal ══ */}
       {showNameModal && (
         <PortalModal>
           <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}

@@ -2,18 +2,63 @@ import React, { useState, useEffect } from "react";
 import { Mail, Key, LogIn, UserPlus, AlertCircle } from "lucide-react";
 import { supabase } from "../utils/supabaseClient";
 
-const STORAGE_EMAIL = "savedEmail";
+const STORAGE_EMAIL   = "savedEmail";
 const STORAGE_REMEMBER = "rememberMe";
+const STORAGE_DEVICE_ID = "deviceId";
+
+/* ─── 穩定裝置指紋（取代 MAC）────────────────────────────────────────
+   瀏覽器無法讀取真實網卡 MAC，改用 canvas + 裝置特徵組合產生穩定 ID。
+   同一裝置 / 瀏覽器每次執行結果相同（除非清除瀏覽器資料）。            */
+async function getDeviceId(): Promise<string> {
+  // 先讀 localStorage，已有就直接回傳
+  const cached = localStorage.getItem(STORAGE_DEVICE_ID);
+  if (cached) return cached;
+
+  // 收集穩定的裝置特徵
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    ctx.textBaseline = "alphabetic";
+    ctx.font = "14px Arial";
+    ctx.fillStyle = "#f60";
+    ctx.fillRect(125, 1, 62, 20);
+    ctx.fillStyle = "#069";
+    ctx.fillText("SmartLock🔒", 2, 15);
+    ctx.fillStyle = "rgba(102,204,0,0.7)";
+    ctx.fillText("SmartLock🔒", 4, 17);
+  }
+  const canvasData = canvas.toDataURL();
+
+  const raw = [
+    canvasData.slice(-64),                           // canvas 像素特徵
+    navigator.userAgent,
+    `${screen.width}x${screen.height}x${screen.colorDepth}`,
+    navigator.language,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+    navigator.hardwareConcurrency ?? "",
+  ].join("|");
+
+  // SHA-256 雜湊
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+  const hex = Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+  // 格式化為 MAC 樣式（方便資料庫相容）
+  const id = [hex.slice(0,2), hex.slice(2,4), hex.slice(4,6),
+               hex.slice(6,8), hex.slice(8,10), hex.slice(10,12)]
+               .join(":").toUpperCase();
+
+  localStorage.setItem(STORAGE_DEVICE_ID, id);
+  return id;
+}
 
 export default function LoginScreen({ onLogin }: { onLogin: (email: string) => void }) {
-  const [isLogin, setIsLogin]     = useState(true);
-  const [email, setEmail]         = useState("");
-  const [password, setPassword]   = useState("");
-  const [error, setError]         = useState("");
-  const [loading, setLoading]     = useState(false);
+  const [isLogin, setIsLogin]       = useState(true);
+  const [email, setEmail]           = useState("");
+  const [password, setPassword]     = useState("");
+  const [error, setError]           = useState("");
+  const [loading, setLoading]       = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
 
-  // ── 初始化：讀取上次儲存的 email 和 rememberMe 狀態 ──
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_REMEMBER) === "true";
     const savedEmail = localStorage.getItem(STORAGE_EMAIL) || "";
@@ -21,24 +66,14 @@ export default function LoginScreen({ onLogin }: { onLogin: (email: string) => v
     if (saved && savedEmail) setEmail(savedEmail);
   }, []);
 
-  const getSimulatedMac = () => {
-    let mac = localStorage.getItem("simulated_mac");
-    if (!mac) {
-      mac = "XX:XX:XX:XX:XX:XX".replace(/X/g, () =>
-        "0123456789ABCDEF".charAt(Math.floor(Math.random() * 16))
-      );
-      localStorage.setItem("simulated_mac", mac);
-    }
-    return mac;
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
-    const mac = getSimulatedMac();
 
     try {
+      const deviceId = await getDeviceId();
+
       if (isLogin) {
         const { error: authError } = await supabase.auth.signInWithPassword({ email, password });
         if (authError) throw authError;
@@ -47,13 +82,17 @@ export default function LoginScreen({ onLogin }: { onLogin: (email: string) => v
           .from("registered_emails").select("mac").eq("email", email).single();
         if (emailError) throw emailError;
 
-        if (emailData.mac && emailData.mac !== mac) throw new Error("設備 MAC 不符，拒絕登入");
-
-        if (!emailData.mac) {
-          await supabase.from("registered_emails").update({ mac }).eq("email", email);
+        // 若已有裝置 ID 且不符則拒絕
+        if (emailData.mac && emailData.mac !== deviceId) {
+          await supabase.auth.signOut();
+          throw new Error("裝置驗證失敗，此帳號已綁定其他裝置");
         }
 
-        // ── 記住我：同時儲存 email ──
+        // 首次登入：綁定裝置 ID
+        if (!emailData.mac) {
+          await supabase.from("registered_emails").update({ mac: deviceId }).eq("email", email);
+        }
+
         if (rememberMe) {
           localStorage.setItem(STORAGE_REMEMBER, "true");
           localStorage.setItem(STORAGE_EMAIL, email);
@@ -66,7 +105,9 @@ export default function LoginScreen({ onLogin }: { onLogin: (email: string) => v
       } else {
         const { error: authError } = await supabase.auth.signUp({ email, password });
         if (authError) throw authError;
-        await supabase.from("registered_emails").insert([{ email, mac: null }]);
+        const { error: insertError } = await supabase
+          .from("registered_emails").insert([{ email, mac: null }]);
+        if (insertError && !insertError.message.includes("duplicate")) throw insertError;
         alert("註冊成功！請登入。");
         setIsLogin(true);
       }
@@ -92,8 +133,7 @@ export default function LoginScreen({ onLogin }: { onLogin: (email: string) => v
 
         {error && (
           <div className="mb-4 p-3 bg-red-500/10 border border-red-500/50 rounded-xl flex items-center gap-2 text-red-400 text-sm">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <p>{error}</p>
+            <AlertCircle className="w-4 h-4 shrink-0" /><p>{error}</p>
           </div>
         )}
 
