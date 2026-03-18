@@ -33,7 +33,17 @@ jobs:
           cache: npm
 
       - run: npm ci
+      - run: |
+          if [ -n "${SUPABASE:-}" ]; then
+            printf "%s\n" "$SUPABASE" >> "$GITHUB_ENV"
+          fi
+        env:
+          SUPABASE: ${{ secrets.SUPABASE || vars.SUPABASE }}
       - run: node -e "['VITE_SUPABASE_URL','VITE_SUPABASE_ANON_KEY'].forEach(k=>{if(!process.env[k]){console.error('Missing '+k);process.exit(1)}})"
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || secrets.SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY }}
+      - run: node -e "console.log('VITE_SUPABASE_URL present:', !!process.env.VITE_SUPABASE_URL); console.log('VITE_SUPABASE_ANON_KEY present:', !!process.env.VITE_SUPABASE_ANON_KEY)"
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || secrets.SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY }}
