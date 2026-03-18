@@ -6,15 +6,14 @@ import { defineConfig, loadEnv } from 'vite';
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
 
-  // 自動從 GitHub Actions 的 GITHUB_REPOSITORY 取得 repo 名稱
-  // 格式: "username/repo-name" → base = "/repo-name/"
-  // 若是本機開發或自訂網域則使用 "/"
-  const repoName = process.env.GITHUB_REPOSITORY
-    ? '/' + process.env.GITHUB_REPOSITORY.split('/')[1] + '/'
+  // VITE_REPO_NAME 由 GitHub Actions 傳入（等於 repo 名稱，例如 "control"）
+  // 本機開發時不會有這個變數，所以 base 為 "/"
+  const base = env.VITE_REPO_NAME
+    ? `/${env.VITE_REPO_NAME}/`
     : '/';
 
   return {
-    base: repoName,
+    base,
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY || ''),
