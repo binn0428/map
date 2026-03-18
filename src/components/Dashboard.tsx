@@ -7,12 +7,11 @@ import {
 import L from "leaflet";
 import {
   Crosshair, ChevronLeft, ChevronRight,
-  LogOut, Settings, Share2, Trash2, X,
+  LogOut, Settings, Share2, Trash2, X, MapPin,
 } from "lucide-react";
 import { supabase } from "../utils/supabaseClient";
 import { connectMqtt, publishMqtt, disconnectMqtt } from "../utils/mqttClient";
 
-// 修正 Leaflet marker icon
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
@@ -20,77 +19,51 @@ L.Icon.Default.mergeOptions({
   shadowUrl:     "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
 });
 
-// ── 自訂圖示：使用者 GPS 位置（藍色脈衝圓點） ──
+/* ─── 自訂圖示 ─────────────────────────────── */
+// 藍色脈衝圓點：GPS 定位
 const gpsIcon = L.divIcon({
   className: "",
-  html: `<div style="
-    width:18px; height:18px;
-    background:#3b82f6;
-    border:3px solid white;
-    border-radius:50%;
-    box-shadow:0 0 0 4px rgba(59,130,246,0.35);
-    animation: pulse-blue 1.8s infinite;
-  "></div>
-  <style>
-    @keyframes pulse-blue {
-      0%,100%{box-shadow:0 0 0 4px rgba(59,130,246,0.35)}
-      50%{box-shadow:0 0 0 8px rgba(59,130,246,0.08)}
-    }
-  </style>`,
-  iconSize: [18, 18],
-  iconAnchor: [9, 9],
+  html: `<div style="width:16px;height:16px;background:#3b82f6;border:3px solid white;
+    border-radius:50%;box-shadow:0 0 0 5px rgba(59,130,246,0.3);
+    animation:gpsPulse 2s infinite ease-in-out"></div>
+  <style>@keyframes gpsPulse{0%,100%{box-shadow:0 0 0 5px rgba(59,130,246,0.3)}
+    50%{box-shadow:0 0 0 10px rgba(59,130,246,0.05)}}</style>`,
+  iconSize: [16, 16],
+  iconAnchor: [8, 8],
 });
 
-// ── 自訂圖示：待確認地點（橘色圓頭 pin） ──
+// 橘色水滴：待確認地點
 const pendingIcon = L.divIcon({
   className: "",
-  html: `<div style="
-    width:28px; height:36px;
-    position:relative;
-    display:flex; flex-direction:column; align-items:center;
-  ">
-    <div style="
-      width:24px; height:24px;
-      background:#f97316;
-      border:3px solid white;
-      border-radius:50% 50% 50% 0;
-      transform:rotate(-45deg);
-      box-shadow:0 2px 6px rgba(0,0,0,0.4);
-    "></div>
-  </div>`,
-  iconSize: [28, 36],
-  iconAnchor: [14, 34],
+  html: `<svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
+    <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0z"
+      fill="#f97316" stroke="white" stroke-width="2"/>
+    <circle cx="12" cy="12" r="4" fill="white"/>
+  </svg>`,
+  iconSize: [24, 32],
+  iconAnchor: [12, 32],
 });
 
-// ── 自訂圖示：已儲存地點（綠色 pin） ──
+// 綠色水滴：已儲存地點
 const savedIcon = L.divIcon({
   className: "",
-  html: `<div style="
-    width:28px; height:36px;
-    position:relative;
-    display:flex; flex-direction:column; align-items:center;
-  ">
-    <div style="
-      width:24px; height:24px;
-      background:#22c55e;
-      border:3px solid white;
-      border-radius:50% 50% 50% 0;
-      transform:rotate(-45deg);
-      box-shadow:0 2px 6px rgba(0,0,0,0.4);
-    "></div>
-  </div>`,
-  iconSize: [28, 36],
-  iconAnchor: [14, 34],
+  html: `<svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
+    <path d="M12 0C5.4 0 0 5.4 0 12c0 9 12 20 12 20s12-11 12-20C24 5.4 18.6 0 12 0z"
+      fill="#22c55e" stroke="white" stroke-width="2"/>
+    <circle cx="12" cy="12" r="4" fill="white"/>
+  </svg>`,
+  iconSize: [24, 32],
+  iconAnchor: [12, 32],
 });
 
-/* ─── 型別 ─── */
+/* ─── 型別 ─────────────────────────────────── */
 interface DeviceCredential {
   id: string;
   device_name: string;
   mqtt_user?: string;
   mqtt_pass?: string;
   share_from?: string | null;
-  share_count?: number; // 對應資料庫的 count 欄位
+  share_count: number;
 }
 interface SavedLocation {
   id: string;
@@ -98,7 +71,7 @@ interface SavedLocation {
   position: [number, number];
 }
 
-/* ─── 地圖子元件 ─── */
+/* ─── 地圖子元件 ────────────────────────────── */
 function FlyTo({ target }: { target: [number, number] | null }) {
   const map = useMap();
   useEffect(() => { if (target) map.flyTo(target, 18, { duration: 1.0 }); }, [target, map]);
@@ -108,8 +81,6 @@ function MapClickHandler({ onMapClick }: { onMapClick: (p: [number, number]) => 
   useMapEvents({ click: (e) => onMapClick([e.latlng.lat, e.latlng.lng]) });
   return null;
 }
-
-/* ─── Portal Modal（渲染到 body，避免 Leaflet stacking context 問題） ─── */
 function PortalModal({ children }: { children: React.ReactNode }) {
   return ReactDOM.createPortal(children, document.body);
 }
@@ -127,6 +98,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting]           = useState(false);
 
+  // 地圖
   const [isStreetView, setIsStreetView]       = useState(false);
   const [userPosition, setUserPosition]       = useState<[number, number] | null>(null);
   const [flyTarget, setFlyTarget]             = useState<[number, number] | null>(null);
@@ -136,13 +108,18 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [savedLocations, setSavedLocations]   = useState<SavedLocation[]>([]);
   const [activeLocIdx, setActiveLocIdx]       = useState(0);
 
-  const isOwnDevice    = selectedDevice && !selectedDevice.share_from;
-  // share_count = 已分享給幾人；剩餘 = MAX - share_count
+  // 新增地點命名彈窗
+  const [showNameModal, setShowNameModal]   = useState(false);
+  const [pendingName, setPendingName]       = useState("");
+
+  const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
   const shareRemaining = isOwnDevice
-    ? MAX_SHARES - (parseInt(String(selectedDevice!.share_count ?? 0), 10))
+    ? MAX_SHARES - (selectedDevice?.share_count ?? 0)
     : null;
 
-  /* ── 取得設備（明確 select count 欄位，避免保留字問題）── */
+  /* ── 取得設備 + 分享次數精確比對 ──────────────────────────────────────
+     規則：user_id 符合登入帳號，且比對 mqtt_user / mqtt_pass / device_name，
+     share_from 為空的那筆才是 owner row，count 才是分享次數             */
   useEffect(() => {
     (async () => {
       try {
@@ -150,12 +127,32 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           .from("device_credentials")
           .select("id, device_name, mqtt_user, mqtt_pass, share_from, count")
           .eq("user_id", email);
+
         if (error) throw error;
-        // 把資料庫的 count 對應到介面的 share_count
-        const mapped = (data || []).map((d: any) => ({
-          ...d,
-          share_count: d.count ?? 0,
-        }));
+        const rows: any[] = data || [];
+
+        // 建立 owner 查找表：key = `${mqtt_user}|${mqtt_pass}|${device_name}`
+        const ownerCountMap: Record<string, number> = {};
+        rows.forEach((r) => {
+          if (!r.share_from) {
+            const key = `${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`;
+            ownerCountMap[key] = parseInt(String(r.count ?? 0), 10);
+          }
+        });
+
+        const mapped: DeviceCredential[] = rows.map((r) => {
+          const key = `${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`;
+          return {
+            id: r.id,
+            device_name: r.device_name,
+            mqtt_user: r.mqtt_user,
+            mqtt_pass: r.mqtt_pass,
+            share_from: r.share_from ?? null,
+            // 無論 owner 或 shared，都查 owner row 的 count
+            share_count: ownerCountMap[key] ?? parseInt(String(r.count ?? 0), 10),
+          };
+        });
+
         setDevices(mapped);
         if (mapped.length) setSelectedDevice(mapped[0]);
       } catch (err) { console.error("fetchDevices:", err); }
@@ -239,14 +236,18 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     setActiveLocIdx(i); setFlyTarget(savedLocations[i].position);
   };
 
-  const handleAddLocation = () => {
+  /* ── 新增地點：先彈出命名視窗 ── */
+  const openNameModal = () => {
     if (!pendingLocation) return;
-    const upd = [...savedLocations, {
-      id: Date.now().toString(),
-      label: `地點 ${savedLocations.length + 1}`,
-      position: pendingLocation,
-    }];
-    setSavedLocations(upd); setActiveLocIdx(upd.length - 1); setPendingLocation(null);
+    setPendingName(`地點 ${savedLocations.length + 1}`);
+    setShowNameModal(true);
+  };
+  const confirmAddLocation = () => {
+    if (!pendingLocation) return;
+    const label = pendingName.trim() || `地點 ${savedLocations.length + 1}`;
+    const upd = [...savedLocations, { id: Date.now().toString(), label, position: pendingLocation }];
+    setSavedLocations(upd); setActiveLocIdx(upd.length - 1);
+    setPendingLocation(null); setPendingName(""); setShowNameModal(false);
   };
 
   /* ── 刪除設備 ── */
@@ -279,9 +280,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             {shareRemaining !== null ? (
               <span className={`text-xs px-2 py-0.5 rounded-full border ${
                 shareRemaining > 0 ? "border-slate-600 text-slate-400" : "border-red-500/60 text-red-400"
-              }`}>
-                分享剩餘 {shareRemaining}/{MAX_SHARES}
-              </span>
+              }`}>分享剩餘 {shareRemaining}/{MAX_SHARES}</span>
             ) : selectedDevice ? (
               <span className="text-xs text-yellow-600 bg-yellow-500/10 border border-yellow-600/30 px-2 py-0.5 rounded-full">
                 共享・不可分享
@@ -356,7 +355,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       </div>
 
       {/* ══ 地圖 ══ */}
-      <div className="bg-slate-900 mx-3 rounded-xl overflow-hidden border border-slate-800 mb-2">
+      {/* ⚠ 不要在此 div 加 overflow-hidden，會讓高倍縮放的 tile 消失 */}
+      <div className="bg-slate-900 mx-3 rounded-xl border border-slate-800 mb-2">
 
         {/* 工具列 */}
         <div className="px-2.5 py-1.5 flex items-center justify-between">
@@ -408,47 +408,55 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           )}
         </div>
 
-        {/* 地圖本體 */}
-        <div className="h-52 w-full">
+        {/* 地圖本體：單獨加 overflow-hidden + rounded-b-xl */}
+        <div className="h-52 w-full overflow-hidden rounded-b-xl">
           <MapContainer
             center={userPosition || DEFAULT_CENTER}
-            zoom={17} maxZoom={22}
+            zoom={17}
+            maxZoom={22}
             zoomControl={false}
             style={{ height: "100%", width: "100%" }}
+            // preferCanvas 加速渲染
+            preferCanvas={false}
           >
             {isStreetView ? (
-              <TileLayer key="street"
+              <TileLayer
+                key="street"
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 attribution="&copy; OSM"
-                maxZoom={22} maxNativeZoom={19} keepBuffer={4} updateWhenIdle={false} />
+                maxZoom={22}
+                maxNativeZoom={19}
+                keepBuffer={8}
+              />
             ) : (
-              <TileLayer key="satellite"
+              <TileLayer
+                key="satellite"
                 url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                 attribution="&copy; Esri"
-                maxZoom={22} maxNativeZoom={20} keepBuffer={4} updateWhenIdle={false} />
+                maxZoom={22}
+                maxNativeZoom={19}  /* Esri 實際最高為 19，超過會放大插值 */
+                keepBuffer={8}
+                crossOrigin=""
+              />
             )}
             <FlyTo target={flyTarget} />
             <MapClickHandler onMapClick={setPendingLocation} />
 
-            {/* 使用者 GPS 位置：藍色脈衝圓點 */}
             {userPosition && (
               <>
-                <Circle center={userPosition} radius={15}
+                <Circle center={userPosition} radius={12}
                   pathOptions={{ fillColor:"#3b82f6", fillOpacity:0.15, color:"#3b82f6", weight:1.5 }} />
                 <Marker position={userPosition} icon={gpsIcon} />
               </>
             )}
-
-            {/* 待確認地點：橘色 pin */}
             {pendingLocation && <Marker position={pendingLocation} icon={pendingIcon} />}
-
-            {/* 已儲存地點：綠色 pin */}
             {savedLocations.map((loc) => (
               <Marker key={loc.id} position={loc.position} icon={savedIcon} />
             ))}
           </MapContainer>
         </div>
 
+        {/* 地圖底部：儲存狀態 */}
         <div className="px-2.5 py-1.5 border-t border-slate-800">
           <p className="text-xs text-slate-400">
             {savedLocations.length > 0
@@ -461,10 +469,12 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       {/* ══ 位置設定 ══ */}
       <div className="bg-slate-900 mx-3 rounded-xl px-3 py-2 border border-slate-800 mb-4">
         <h2 className="text-xs font-bold text-slate-400 mb-1.5">位置設定</h2>
-        <button onClick={handleAddLocation} disabled={!pendingLocation}
-          className="w-full py-2.5 rounded-xl border border-purple-600 bg-purple-900/20 text-white font-bold text-sm active:bg-purple-900/40 disabled:opacity-40 disabled:cursor-not-allowed">
-          {pendingLocation ? "✚ 新增地點" : "新增地點（請先點選地圖）"}
+        <button onClick={openNameModal} disabled={!pendingLocation}
+          className="w-full py-2.5 rounded-xl border border-purple-600 bg-purple-900/20 text-white font-bold text-sm active:bg-purple-900/40 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+          <MapPin className="w-4 h-4" />
+          {pendingLocation ? "新增地點（輸入名稱）" : "新增地點（請先點選地圖）"}
         </button>
+
         {savedLocations.length > 0 && (
           <div className="mt-1.5 space-y-1">
             {savedLocations.map((loc, idx) => (
@@ -475,7 +485,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 <div className="flex items-center gap-1.5 min-w-0">
                   <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${idx === activeLocIdx ? "bg-purple-400" : "bg-slate-500"}`} />
                   <span className="text-slate-300 truncate">{loc.label}</span>
-                  <span className="text-slate-500">{loc.position[0].toFixed(3)},{loc.position[1].toFixed(3)}</span>
+                  <span className="text-slate-500 flex-shrink-0">
+                    {loc.position[0].toFixed(3)},{loc.position[1].toFixed(3)}
+                  </span>
                 </div>
                 <div className="flex gap-3 ml-2 flex-shrink-0">
                   <button onClick={() => { setActiveLocIdx(idx); setFlyTarget(loc.position); }}
@@ -492,11 +504,46 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         )}
       </div>
 
-      {/* ══ 設備帳密 Sheet（Portal → 不受 Leaflet stacking context 影響）══ */}
+      {/* ══ 命名地點 Modal ══ */}
+      {showNameModal && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowNameModal(false)}>
+            <div className="bg-slate-900 border-t border-purple-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-1">為地點命名</h3>
+              <p className="text-xs text-slate-500 mb-3">
+                📍 {pendingLocation?.[0].toFixed(5)}, {pendingLocation?.[1].toFixed(5)}
+              </p>
+              <input
+                type="text"
+                value={pendingName}
+                onChange={(e) => setPendingName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && confirmAddLocation()}
+                placeholder="輸入地點名稱"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-purple-500 mb-3"
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button onClick={() => { setShowNameModal(false); setPendingName(""); }}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                  取消
+                </button>
+                <button onClick={confirmAddLocation}
+                  className="flex-1 py-2.5 rounded-xl bg-purple-600 text-white text-sm font-bold active:bg-purple-700">
+                  ✚ 新增
+                </button>
+              </div>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 設備帳密 Sheet ══ */}
       {showCredentials && (
         <PortalModal>
-          <div className="fixed inset-0 bg-black/70 flex items-end justify-center"
-            style={{ zIndex: 99999 }}
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
             onClick={() => setShowCredentials(false)}>
             <div className="bg-slate-900 border-t border-slate-700 rounded-t-2xl p-5 w-full max-w-lg"
               onClick={(e) => e.stopPropagation()}>
@@ -527,11 +574,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         </PortalModal>
       )}
 
-      {/* ══ 重置確認 Sheet（Portal）══ */}
+      {/* ══ 重置確認 Sheet ══ */}
       {showResetConfirm && (
         <PortalModal>
-          <div className="fixed inset-0 bg-black/70 flex items-end justify-center"
-            style={{ zIndex: 99999 }}
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
             onClick={() => setShowResetConfirm(false)}>
             <div className="bg-slate-900 border-t border-red-500/40 rounded-t-2xl p-5 w-full max-w-lg"
               onClick={(e) => e.stopPropagation()}>
