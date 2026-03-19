@@ -7,7 +7,7 @@ import {
 import L from "leaflet";
 import {
   Crosshair, ChevronLeft, ChevronRight,
-  LogOut, Settings, Share2, Trash2, X, MapPin,
+  LogOut, Settings, Share2, Trash2, X, MapPin, UserMinus, Users,
 } from "lucide-react";
 import { supabase } from "../utils/supabaseClient";
 import { connectMqtt, publishMqtt, disconnectMqtt } from "../utils/mqttClient";
@@ -54,6 +54,10 @@ interface DeviceCredential {
   mqtt_pass?: string;
   share_from?: string | null;
   share_count: number;
+}
+interface SharedWithItem {
+  id: string;           // device_credentials.id of the shared row
+  user_id: string;      // 被分享者的 email
 }
 interface SavedLocation {
   id: string;
@@ -107,6 +111,15 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [shareEmail, setShareEmail]           = useState("");
   const [shareLoading, setShareLoading]       = useState(false);
   const [shareError, setShareError]           = useState("");
+
+  // 管理分享（主人撤銷）
+  const [showManageModal, setShowManageModal] = useState(false);
+  const [sharedWithList, setSharedWithList]   = useState<SharedWithItem[]>([]);
+  const [manageLoading, setManageLoading]     = useState(false);
+
+  // 離開分享（被分享者）
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [leaveLoading, setLeaveLoading]         = useState(false);
 
   const isOwnDevice    = !!(selectedDevice && !selectedDevice.share_from);
   // count 本身就代表剩餘次數（每次分享 -1）
@@ -235,46 +248,19 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   };
 
   /* ── 分享設備 ──────────────────────────────────────────────────────
-     邏輯（依截圖資料庫結構）：
-     1. 確認目標 email 存在於 registered_emails
-     2. 確認尚未分享給該 email（避免重複）
-     3. INSERT 新 row：user_id=目標email, 相同 mqtt_user/pass/device_name,
-        share_from=自己的email, count 同 owner row
-     4. UPDATE owner 的 count + 1
-     5. 重新 fetch 更新 UI                                             */
+     邏輯：直接 INSERT，讓資料庫回報錯誤（不做跨帳號 RLS 查詢）         */
   const handleShare = async () => {
     if (!selectedDevice || !isOwnDevice) return;
     const target = shareEmail.trim().toLowerCase();
     if (!target) { setShareError("請輸入 Email"); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(target)) { setShareError("Email 格式不正確"); return; }
     if (target === email.toLowerCase()) { setShareError("不能分享給自己"); return; }
     if ((shareRemaining ?? 0) <= 0) { setShareError("分享次數已用盡"); return; }
 
     setShareLoading(true);
     setShareError("");
     try {
-      // 1. 確認目標 email 已註冊
-      // 1. 確認目標 email 已註冊
-      // 改用 maybeSingle() 避免 RLS 阻擋跨帳號查詢時誤報錯誤
-      const { data: reg } = await supabase
-        .from("registered_emails").select("email").eq("email", target).maybeSingle();
-      if (!reg) {
-        // RLS 可能限制查 registered_emails；fallback 查 device_credentials
-        const { data: anyDev } = await supabase
-          .from("device_credentials").select("id").eq("user_id", target).limit(1).maybeSingle();
-        if (!anyDev) throw new Error("找不到此 Email，請確認對方已註冊");
-      }
-
-      // 2. 確認未重複分享
-      const { data: exists } = await supabase
-        .from("device_credentials")
-        .select("id")
-        .eq("user_id", target)
-        .eq("device_name", selectedDevice.device_name)
-        .eq("mqtt_user", selectedDevice.mqtt_user ?? "")
-        .maybeSingle();
-      if (exists) throw new Error("已分享給此 Email");
-
-      // 3. 取得 owner row 的 id（share_from 為空的那筆）
+      // 1. 取得 owner row
       const { data: ownerRow, error: ownerErr } = await supabase
         .from("device_credentials")
         .select("id, count")
@@ -283,33 +269,39 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         .eq("mqtt_user", selectedDevice.mqtt_user ?? "")
         .is("share_from", null)
         .single();
-      if (ownerErr || !ownerRow) throw new Error("找不到設備 owner 資料");
+      if (ownerErr || !ownerRow) throw new Error("找不到設備資料，請重新整理後再試");
 
       const currentCount = parseInt(String(ownerRow.count ?? 0), 10);
 
-      // 4. INSERT 分享 row
-      const { error: insertErr } = await supabase
+      // 2. UPSERT 分享 row
+      //    用 upsert 取代 insert，避免舊版殘留資料造成 unique 衝突
+      //    onConflict 需對應 device_credentials 的 unique constraint 欄位
+      const { error: upsertErr } = await supabase
         .from("device_credentials")
-        .insert({
-          user_id:     target,
-          device_name: selectedDevice.device_name,
-          mqtt_user:   selectedDevice.mqtt_user,
-          mqtt_pass:   selectedDevice.mqtt_pass,
-          share_from:  email,
-          count:       currentCount - 1,
-        });
-      if (insertErr) throw insertErr;
+        .upsert(
+          {
+            user_id:     target,
+            device_name: selectedDevice.device_name,
+            mqtt_user:   selectedDevice.mqtt_user,
+            mqtt_pass:   selectedDevice.mqtt_pass,
+            share_from:  email,
+            count:       currentCount - 1,
+          },
+          { onConflict: "user_id,device_name,mqtt_user" }
+        );
 
-      // 5. UPDATE owner count - 1
-      const { error: updateErr } = await supabase
+      if (upsertErr) {
+        console.error("UPSERT error:", upsertErr);
+        throw new Error(`[${upsertErr.code}] ${upsertErr.message}`);
+      }
+
+      // 3. UPDATE owner count - 1
+      await supabase
         .from("device_credentials")
         .update({ count: currentCount - 1 })
         .eq("id", ownerRow.id);
-      if (updateErr) throw updateErr;
 
-      // 重新 fetch
       await fetchDevices();
-
       setShowShareModal(false);
       setShareEmail("");
       alert(`已成功分享「${selectedDevice.device_name}」給 ${target}`);
@@ -348,6 +340,90 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     const upd = devices.filter((d) => d.id !== dev.id);
     setDevices(upd);
     if (selectedDevice?.id === dev.id) setSelectedDevice(upd[0] ?? null);
+  };
+
+  /* ── 管理分享：載入被分享者清單 ──────────────────────────────────────
+     需要 Supabase RLS：
+     CREATE POLICY "owner can see shared rows"
+     ON public.device_credentials FOR SELECT TO authenticated
+     USING (share_from = auth.email());                                  */
+  const openManageModal = async () => {
+    if (!selectedDevice) return;
+    setManageLoading(true);
+    setSharedWithList([]);
+    setShowManageModal(true);
+    try {
+      const { data } = await supabase
+        .from("device_credentials")
+        .select("id, user_id")
+        .eq("share_from", email)
+        .eq("device_name", selectedDevice.device_name)
+        .eq("mqtt_user", selectedDevice.mqtt_user ?? "");
+      setSharedWithList((data || []).map((r: any) => ({ id: r.id, user_id: r.user_id })));
+    } catch (err) { console.error(err); }
+    finally { setManageLoading(false); }
+  };
+
+  /* ── 主人撤銷某人的分享 ──────────────────────────────────────────────
+     需要 Supabase RLS：
+     CREATE POLICY "owner can delete shared rows"
+     ON public.device_credentials FOR DELETE TO authenticated
+     USING (share_from = auth.email());                                  */
+  const handleRevokeShare = async (item: SharedWithItem) => {
+    if (!selectedDevice) return;
+    if (!confirm(`撤銷對 ${item.user_id} 的分享？`)) return;
+    try {
+      // DELETE 被分享者的 row
+      const { error: delErr } = await supabase
+        .from("device_credentials")
+        .delete()
+        .eq("id", item.id);
+      if (delErr) throw delErr;
+
+      // UPDATE owner count + 1（恢復一次分享次數）
+      const { data: ownerRow } = await supabase
+        .from("device_credentials")
+        .select("id, count")
+        .eq("user_id", email)
+        .eq("device_name", selectedDevice.device_name)
+        .eq("mqtt_user", selectedDevice.mqtt_user ?? "")
+        .is("share_from", null)
+        .single();
+      if (ownerRow) {
+        await supabase
+          .from("device_credentials")
+          .update({ count: parseInt(String(ownerRow.count ?? 0), 10) + 1 })
+          .eq("id", ownerRow.id);
+      }
+
+      setSharedWithList((prev) => prev.filter((i) => i.id !== item.id));
+      await fetchDevices();
+    } catch (err: any) {
+      alert("撤銷失敗：" + (err.message || err));
+    }
+  };
+
+  /* ── 被分享者：自行離開分享 ────────────────────────────────────────── */
+  const handleLeaveShare = async () => {
+    if (!selectedDevice?.share_from) return;
+    setLeaveLoading(true);
+    try {
+      // 只刪自己的 row（user_id = email, share_from IS NOT NULL）
+      const { error } = await supabase
+        .from("device_credentials")
+        .delete()
+        .eq("id", selectedDevice.id);
+      if (error) throw error;
+
+      const upd = devices.filter((d) => d.id !== selectedDevice.id);
+      setDevices(upd);
+      setSelectedDevice(upd[0] ?? null);
+      setShowLeaveConfirm(false);
+    } catch (err: any) {
+      alert("離開失敗：" + (err.message || err));
+    } finally {
+      setLeaveLoading(false);
+    }
   };
 
   if (loading) return (
@@ -407,21 +483,38 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">▾</div>
           </div>
 
-          {isOwnDevice && (
+          {isOwnDevice ? (
             <>
-              {/* 分享按鈕：剩餘次數 > 0 才可按 */}
+              {/* 分享按鈕 */}
               <button
                 onClick={() => { setShareEmail(""); setShareError(""); setShowShareModal(true); }}
                 disabled={(shareRemaining ?? 0) <= 0}
-                className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-blue-400 active:bg-blue-500/20 disabled:opacity-30 disabled:cursor-not-allowed">
+                className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-blue-400 active:bg-blue-500/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="分享設備">
                 <Share2 className="w-3.5 h-3.5" />
               </button>
+              {/* 管理分享（已分享者清單）*/}
+              <button
+                onClick={openManageModal}
+                className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-purple-400 active:bg-purple-500/20"
+                title="管理分享">
+                <Users className="w-3.5 h-3.5" />
+              </button>
               <button onClick={() => selectedDevice && handleDeleteDevice(selectedDevice)}
-                className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-red-400 active:bg-red-500/20">
+                className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-red-400 active:bg-red-500/20"
+                title="刪除設備">
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
             </>
-          )}
+          ) : selectedDevice?.share_from ? (
+            /* 被分享者：離開分享按鈕 */
+            <button
+              onClick={() => setShowLeaveConfirm(true)}
+              className="p-2 rounded-lg bg-slate-800 border border-orange-600/60 text-orange-400 active:bg-orange-500/20"
+              title="離開分享">
+              <UserMinus className="w-3.5 h-3.5" />
+            </button>
+          ) : null}
           <button onClick={() => setShowResetConfirm(true)}
             className="px-2.5 py-2 rounded-lg bg-red-500 text-white text-xs font-semibold active:bg-red-600">
             重置
@@ -690,6 +783,88 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                 className="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl mt-4 text-sm active:bg-blue-700">
                 關閉
               </button>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 管理分享 Modal（主人查看被分享者，可撤銷）══ */}
+      {showManageModal && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowManageModal(false)}>
+            <div className="bg-slate-900 border-t border-purple-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-bold">管理分享</h3>
+                <span className="text-xs text-slate-500">{selectedDevice?.device_name}</span>
+              </div>
+
+              {manageLoading ? (
+                <div className="flex justify-center py-6">
+                  <div className="w-6 h-6 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : sharedWithList.length === 0 ? (
+                <div className="text-center py-6">
+                  <Users className="w-8 h-8 text-slate-600 mx-auto mb-2" />
+                  <p className="text-slate-500 text-sm">尚未分享給任何人</p>
+                </div>
+              ) : (
+                <div className="space-y-2 mb-3 max-h-60 overflow-y-auto">
+                  {sharedWithList.map((item) => (
+                    <div key={item.id}
+                      className="flex items-center justify-between px-3 py-2.5 bg-slate-800 rounded-xl border border-slate-700">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-2 h-2 rounded-full bg-yellow-500 flex-shrink-0" />
+                        <span className="text-sm text-slate-200 truncate">{item.user_id}</span>
+                      </div>
+                      <button
+                        onClick={() => handleRevokeShare(item)}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/20 border border-red-500/40 text-red-400 text-xs font-medium active:bg-red-500/40 flex-shrink-0 ml-2">
+                        <UserMinus className="w-3 h-3" />撤銷
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <button onClick={() => setShowManageModal(false)}
+                className="w-full py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                關閉
+              </button>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 離開分享確認 Modal（被分享者）══ */}
+      {showLeaveConfirm && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setShowLeaveConfirm(false)}>
+            <div className="bg-slate-900 border-t border-orange-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-1 text-orange-400">離開分享</h3>
+              <p className="text-slate-300 text-xs mb-0.5">
+                確定要離開「{selectedDevice?.device_name}」的共享？
+              </p>
+              <p className="text-slate-500 text-xs mb-4">
+                離開後將無法控制此設備，不影響設備主人的設定。
+              </p>
+              <div className="flex gap-2">
+                <button onClick={() => setShowLeaveConfirm(false)} disabled={leaveLoading}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                  取消
+                </button>
+                <button onClick={handleLeaveShare} disabled={leaveLoading}
+                  className="flex-1 py-2.5 rounded-xl bg-orange-600 text-white text-sm font-bold active:bg-orange-700 flex items-center justify-center gap-2">
+                  {leaveLoading
+                    ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    : <><UserMinus className="w-4 h-4" />確認離開</>}
+                </button>
+              </div>
             </div>
           </div>
         </PortalModal>
