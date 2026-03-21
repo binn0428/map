@@ -273,30 +273,22 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
       const currentCount = parseInt(String(ownerRow.count ?? 0), 10);
 
-      // 2. 先查有無舊資料 → 有則 UPDATE，無則 INSERT
-      //    完全避免 upsert onConflict 依賴 DB constraint 名稱的問題
+      // 2. 先查對方是否已有此設備（含 share_from 欄位判斷是否已分享）
       const { data: existingRow } = await supabase
         .from("device_credentials")
-        .select("id")
+        .select("id, share_from")
         .eq("user_id", target)
         .eq("device_name", selectedDevice.device_name)
         .eq("mqtt_user", selectedDevice.mqtt_user ?? "")
         .maybeSingle();
 
       if (existingRow) {
-        // 已有舊資料（殘留）→ 直接更新
-        const { error: updateSharedErr } = await supabase
-          .from("device_credentials")
-          .update({
-            mqtt_pass:  selectedDevice.mqtt_pass,
-            share_from: email,
-            count:      currentCount - 1,
-          })
-          .eq("id", existingRow.id);
-        if (updateSharedErr) {
-          console.error("UPDATE shared error:", updateSharedErr);
-          throw new Error(`更新分享資料失敗：[${updateSharedErr.code}] ${updateSharedErr.message}`);
+        // 已有 share_from → 代表已經分享過，禁止重複
+        if (existingRow.share_from) {
+          throw new Error(`「${selectedDevice.device_name}」已分享給 ${target}，請勿重複分享`);
         }
+        // share_from 為 null → 對方是此設備的 owner，不能分享給他
+        throw new Error(`${target} 本身已是此設備的擁有者，無法再分享`);
       } else {
         // 全新分享 → INSERT
         const { error: insertErr } = await supabase
