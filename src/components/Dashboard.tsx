@@ -50,6 +50,8 @@ const savedIcon = L.divIcon({
 interface DeviceCredential {
   id: string;
   device_name: string;
+  device_name_initial?: string | null;  // 供裝時複製，不再異動
+  device_name_custom?: string | null;   // 使用者自訂名稱
   mqtt_user?: string;
   mqtt_pass?: string;
   share_from?: string | null;
@@ -77,6 +79,16 @@ function MapClickHandler({ onMapClick }: { onMapClick: (p: [number, number]) => 
 }
 function PortalModal({ children }: { children: React.ReactNode }) {
   return ReactDOM.createPortal(children, document.body);
+}
+
+/* 顯示名稱優先順序：device_name_custom → device_name_initial → device_name → mqtt_user */
+function displayName(d: DeviceCredential | null): string {
+  if (!d) return "";
+  return d.device_name_custom?.trim()
+    || d.device_name_initial?.trim()
+    || d.device_name?.trim()
+    || d.mqtt_user
+    || "";
 }
 
 const MAX_SHARES = 5;
@@ -134,7 +146,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     try {
       const { data, error } = await supabase
         .from("device_credentials")
-        .select("id, device_name, mqtt_user, mqtt_pass, share_from, count")
+        .select("id, device_name, device_name_initial, device_name_custom, mqtt_user, mqtt_pass, share_from, count")
         .eq("user_id", email);
       if (error) throw error;
       const rows: any[] = data || [];
@@ -151,12 +163,31 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       const mapped: DeviceCredential[] = rows.map((r) => ({
         id: r.id,
         device_name: r.device_name,
+        device_name_initial: r.device_name_initial ?? null,
+        device_name_custom: r.device_name_custom ?? null,
         mqtt_user: r.mqtt_user,
         mqtt_pass: r.mqtt_pass,
         share_from: r.share_from ?? null,
         share_count: ownerCountMap[`${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`]
           ?? parseInt(String(r.count ?? 0), 10),
       }));
+
+      // 自動補寫 device_name_initial（只寫一次，不覆蓋既有值）
+      const needsInit = mapped.filter(
+        (d) => !d.device_name_initial && d.device_name
+      );
+      if (needsInit.length > 0) {
+        await Promise.all(
+          needsInit.map((d) =>
+            supabase
+              .from("device_credentials")
+              .update({ device_name_initial: d.device_name })
+              .eq("id", d.id)
+          )
+        );
+        // 同步到本地 state
+        needsInit.forEach((d) => { d.device_name_initial = d.device_name; });
+      }
 
       setDevices(mapped);
       if (mapped.length && !selectedDevice) setSelectedDevice(mapped[0]);
@@ -289,7 +320,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       if (existingRow) {
         // 已有 share_from → 代表已經分享過，禁止重複
         if (existingRow.share_from) {
-          throw new Error(`「${selectedDevice.device_name}」已分享給 ${target}，請勿重複分享`);
+          throw new Error(`「${displayName(selectedDevice)}」已分享給 ${target}，請勿重複分享`);
         }
         // share_from 為 null → 對方是此設備的 owner，不能分享給他
         throw new Error(`${target} 本身已是此設備的擁有者，無法再分享`);
@@ -320,7 +351,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       await fetchDevices();
       setShowShareModal(false);
       setShareEmail("");
-      alert(`已成功分享「${selectedDevice.device_name}」給 ${target}`);
+      alert(`已成功分享「${displayName(selectedDevice)}」給 ${target}`);
     } catch (err: any) {
       setShareError(err.message || "分享失敗");
     } finally {
@@ -353,7 +384,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
      主帳號刪除：同時刪除所有 share_from = email 的分享 row（連帶清除）
      分享來的設備刪除：只刪自己那筆（邏輯不變）                          */
   const handleDeleteDevice = async (dev: DeviceCredential) => {
-    if (!confirm(`刪除「${dev.device_name}」？`)) return;
+    if (!confirm(`刪除「${displayName(dev)}」？`)) return;
     try {
       if (!dev.share_from) {
         // 主帳號的設備：先刪所有被分享出去的 row（share_from = 自己 email）
@@ -386,25 +417,26 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   };
 
   /* ── 修改設備名稱 ──────────────────────────────────────────────────────
-     1. UPDATE 主帳號的 owner row
-     2. 同步 UPDATE 所有 share_from = email 的分享 row（級聯更新）       */
+     只更新 device_name_custom，device_name 完全不動。
+     同步更新 share_from = email 的分享 row（相同 mqtt_user/pass/device_name）*/
   const handleRenameDevice = async () => {
     if (!selectedDevice || !newDeviceName.trim()) return;
     const trimmed = newDeviceName.trim();
-    if (trimmed === selectedDevice.device_name) { setEditingName(false); return; }
+    const curDisplay = displayName(selectedDevice);
+    if (trimmed === curDisplay) { setEditingName(false); return; }
     try {
-      // 更新 owner row
+      // 更新自己的 row（只寫 device_name_custom）
       const { error: e1 } = await supabase
         .from("device_credentials")
-        .update({ device_name: trimmed })
+        .update({ device_name_custom: trimmed })
         .eq("id", selectedDevice.id);
       if (e1) throw e1;
 
-      // 同步更新所有分享 row（share_from = 自己 email，舊名稱相同）
+      // 若是主帳號設備，同步更新所有分享 row 的 device_name_custom
       if (!selectedDevice.share_from) {
         await supabase
           .from("device_credentials")
-          .update({ device_name: trimmed })
+          .update({ device_name_custom: trimmed })
           .eq("share_from", email)
           .eq("device_name", selectedDevice.device_name)
           .eq("mqtt_user", selectedDevice.mqtt_user ?? "");
@@ -412,10 +444,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
       // 更新本地 state
       const upd = devices.map((d) =>
-        d.id === selectedDevice.id ? { ...d, device_name: trimmed } : d
+        d.id === selectedDevice.id ? { ...d, device_name_custom: trimmed } : d
       );
       setDevices(upd);
-      setSelectedDevice({ ...selectedDevice, device_name: trimmed });
+      setSelectedDevice({ ...selectedDevice, device_name_custom: trimmed });
       setEditingName(false);
     } catch (err: any) {
       alert("改名失敗：" + (err.message || err));
@@ -607,7 +639,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       {devices.length === 0 && <option value="">無設備</option>}
                       {devices.map((d) => (
                         <option key={d.id} value={d.id}>
-                          {d.share_from ? `⬦ ${d.device_name}` : `● ${d.device_name}`}
+                          {d.share_from ? `⬦ ${displayName(d)}` : `● ${displayName(d)}`}
                         </option>
                       ))}
                     </select>
@@ -616,7 +648,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                   {/* 主帳號才顯示改名按鈕 */}
                   {isOwnDevice && (
                     <button
-                      onClick={() => { setNewDeviceName(selectedDevice?.device_name ?? ""); setEditingName(true); }}
+                      onClick={() => { setNewDeviceName(displayName(selectedDevice)); setEditingName(true); }}
                       className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 active:bg-slate-700"
                       title="修改設備名稱">
                       <Pencil className="w-3.5 h-3.5" />
@@ -685,6 +717,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             <div className="hidden md:block bg-slate-800/50 rounded-xl border border-slate-700 px-3 py-2.5 mb-2">
               <p className="text-xs text-slate-500 mb-1.5">設備資訊</p>
               <div className="space-y-1">
+                <div className="flex justify-between text-xs">
+                  <span className="text-slate-500">顯示名稱</span>
+                  <span className="text-slate-200 font-medium truncate max-w-[160px]">{displayName(selectedDevice)}</span>
+                </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-slate-500">帳號</span>
                   <span className="text-slate-300 font-mono">{selectedDevice.mqtt_user || "未設定"}</span>
@@ -855,7 +891,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
               <h3 className="text-sm font-bold mb-0.5">分享設備</h3>
               <p className="text-xs text-slate-500 mb-3">
-                {selectedDevice?.device_name}・剩餘 {shareRemaining} 次
+                {displayName(selectedDevice)}・剩餘 {shareRemaining} 次
               </p>
               {shareError && (
                 <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 mb-3">
@@ -969,7 +1005,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-bold">管理分享</h3>
-                <span className="text-xs text-slate-500">{selectedDevice?.device_name}</span>
+                <span className="text-xs text-slate-500">{displayName(selectedDevice)}</span>
               </div>
 
               {manageLoading ? (
@@ -1019,7 +1055,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
               <h3 className="text-sm font-bold mb-1 text-orange-400">離開分享</h3>
               <p className="text-slate-300 text-xs mb-0.5">
-                確定要離開「{selectedDevice?.device_name}」的共享？
+                確定要離開「{displayName(selectedDevice)}」的共享？
               </p>
               <p className="text-slate-500 text-xs mb-4">
                 離開後將無法控制此設備，不影響設備主人的設定。
