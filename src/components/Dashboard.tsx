@@ -171,7 +171,38 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
         .from("device_credentials")
         .select("id, device_name, device_name_initial, device_name_custom, mqtt_user, mqtt_pass, server_no, share_from, count")
         .eq("user_id", email);
-      if (error) throw error;
+      if (error) {
+        // 若 server_no 欄位不存在，嘗試不含 server_no 的 fallback 查詢
+        console.warn("fetchDevices 主查詢失敗，嘗試不含 server_no:", error.message);
+        const { data: data2, error: error2 } = await supabase
+          .from("device_credentials")
+          .select("id, device_name, device_name_initial, device_name_custom, mqtt_user, mqtt_pass, share_from, count")
+          .eq("user_id", email);
+        if (error2) throw error2;
+        const rows2: any[] = data2 || [];
+        const ownerCountMap2: Record<string, number> = {};
+        rows2.forEach((r) => {
+          if (!r.share_from) {
+            ownerCountMap2[`${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`] =
+              parseInt(String(r.count ?? 0), 10);
+          }
+        });
+        const mapped2: DeviceCredential[] = rows2.map((r) => ({
+          id: r.id,
+          device_name: r.device_name,
+          device_name_initial: r.device_name_initial ?? null,
+          device_name_custom: r.device_name_custom ?? null,
+          mqtt_user: r.mqtt_user,
+          mqtt_pass: r.mqtt_pass,
+          server_no: null,
+          share_from: r.share_from ?? null,
+          share_count: ownerCountMap2[`${r.mqtt_user}|${r.mqtt_pass}|${r.device_name}`]
+            ?? parseInt(String(r.count ?? 0), 10),
+        }));
+        setDevices(mapped2);
+        if (mapped2.length && !selectedDevice) setSelectedDevice(mapped2[0]);
+        return;
+      }
       const rows: any[] = data || [];
 
       // 建立 owner count 查找表：key = mqtt_user|mqtt_pass|device_name
