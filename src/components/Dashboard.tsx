@@ -95,18 +95,24 @@ function displayName(d: DeviceCredential | null): string {
 const MAX_SHARES = 5;
 const DEFAULT_CENTER: [number, number] = [22.6273, 120.3014];
 
-/* ─── MQTT 伺服器對照表：key = server_no ─── */
-const MQTT_List: Record<number, string> = {
+/* ─── MQTT 伺服器對照表（初始為空，從 DB 載入）─── */
+// DB 資料表：mqtt_servers ( server_no int PK, broker_url text )
+// 靜態 fallback：若 DB 尚未建立，使用此預設值
+const MQTT_FALLBACK: Record<number, string> = {
   1: "wss://8141bbadc4214f9d9f30e7822bd41522.s1.eu.hivemq.cloud:8884/mqtt",
-  // 2: "wss://<server2-host>:8884/mqtt",
-  // 3: "wss://<server3-host>:8884/mqtt",
 };
 
-/** 依 device 的 server_no 取得對應 MQTT Broker URL；找不到時回傳 null */
-function getBrokerUrl(device: DeviceCredential | null): string | null {
+/** 依 device 的 server_no 從傳入的 mqttList 取得 Broker URL；找不到時回傳 null */
+function getBrokerUrl(
+  device: DeviceCredential | null,
+  mqttList: Record<number, string>
+): string | null {
   if (!device) return null;
-  const no = device.server_no ?? 1;   // 無 server_no 預設 1
-  return MQTT_List[no] ?? null;
+  // server_no 為 null / undefined / 0 時一律 fallback 到 1
+  const no: number = (device.server_no != null && device.server_no > 0)
+    ? device.server_no
+    : 1;
+  return mqttList[no] ?? null;
 }
 
 export default function Dashboard({ email, onLogout }: { email: string; onLogout: () => void }) {
@@ -117,6 +123,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   const [showCredentials, setShowCredentials]   = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetting, setResetting]           = useState(false);
+
+  // MQTT 伺服器對照表（從 DB 載入）
+  const [mqttList, setMqttList] = useState<Record<number, string>>(MQTT_FALLBACK);
 
   // 地圖
   const [isStreetView, setIsStreetView]       = useState(false);
@@ -215,6 +224,26 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   useEffect(() => { fetchDevices(); }, [fetchDevices]);
 
+  /* ── 從 DB 載入 MQTT 伺服器清單 ──────────────────────────────────────
+     資料表：mqtt_list ( id, user_id, server_no int, url text )
+     邏輯：取出 user_id = email 的所有列，以 server_no 為 key 建立對照表
+     若查詢失敗或無資料，保留 MQTT_FALLBACK 靜態值。                  */
+  useEffect(() => {
+    supabase
+      .from("mqtt_list")
+      .select("server_no, url")
+      .eq("user_id", email)
+      .then(({ data, error }) => {
+        if (error) { console.error("[mqtt_list]", error); return; }
+        if (!data || data.length === 0) return; // 保留 fallback
+        const map: Record<number, string> = { ...MQTT_FALLBACK };
+        data.forEach((row: { server_no: number; url: string }) => {
+          if (row.server_no != null && row.url) map[row.server_no] = row.url;
+        });
+        setMqttList(map);
+      });
+  }, [email]);
+
   /* ── 開啟頁面自動 GPS 定位 ── */
   useEffect(() => {
     if (!navigator.geolocation) return;
@@ -240,10 +269,10 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   useEffect(() => {
     if (!mqttUser || !mqttPass) return;
 
-    // 依 device 的 server_no 比對 mqtt_user / mqtt_pass，取得對應 Broker URL
-    const brokerUrl = getBrokerUrl(selectedDevice);
+    // 依 device 的 server_no 從 mqttList 取得對應 Broker URL
+    const brokerUrl = getBrokerUrl(selectedDevice, mqttList);
     if (!brokerUrl) {
-      console.warn(`[MQTT] server_no=${serverNo} 在 MQTT_List 中找不到對應 URL，放棄連線`);
+      console.warn(`[MQTT] server_no=${serverNo} 在 mqttList 中找不到對應 URL，放棄連線`);
       setMqttStatus("Disconnected");
       return;
     }
@@ -260,7 +289,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
     client.on("close",     () => { if (isActive) setMqttStatus("Disconnected"); });
     client.on("reconnect", () => { if (isActive) setMqttStatus("Connecting..."); });
     return () => { isActive = false; disconnectMqtt(); };
-  }, [deviceId, mqttUser, mqttPass, serverNo]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceId, mqttUser, mqttPass, serverNo, mqttList]);
 
   /* ── 登出 ── */
   const handleLogout = async () => {
@@ -286,9 +316,9 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
   /* ── 控制 ── */
   const handleControl = (action: string) => {
     if (!selectedDevice?.mqtt_user || !selectedDevice?.device_name) { alert("請先選擇設備"); return; }
-    const brokerUrl = getBrokerUrl(selectedDevice);
+    const brokerUrl = getBrokerUrl(selectedDevice, mqttList);
     if (!brokerUrl) {
-      alert(`設備「${displayName(selectedDevice)}」的伺服器（server_no=${selectedDevice.server_no}）未設定，無法觸發`);
+      alert(`設備「${displayName(selectedDevice)}」的伺服器（server_no=${selectedDevice.server_no ?? 1}）URL 未設定，請確認 mqtt_servers 資料表`);
       return;
     }
     const pin = action === "open" ? "D4" : action === "stop" ? "D18" : "D19";
@@ -454,16 +484,34 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   /* ── 修改設備名稱 ──────────────────────────────────────────────────────
      只更新 device_name_custom，device_name 完全不動。
+     還原條件（寫入 null）：
+       ① 輸入框清空（空字串）
+       ② 輸入值等於 device_name_initial 或 device_name（原始名稱）
      同步更新 share_from = email 的分享 row（相同 mqtt_user/pass/device_name）*/
   const handleRenameDevice = async () => {
-    if (!selectedDevice || !newDeviceName.trim()) return;
+    if (!selectedDevice) return;
     const trimmed = newDeviceName.trim();
-    if (trimmed === (selectedDevice.device_name ?? "")) { setEditingName(false); return; }
+
+    // 原始名稱（供裝初始值 → device_name 回退）
+    const originalName = (selectedDevice.device_name_initial?.trim() || selectedDevice.device_name?.trim() || "");
+
+    // 還原條件：清空 或 輸入原始名稱
+    const isRestoring = trimmed === "" || trimmed === originalName;
+
+    // 若自訂名稱已相同（且非還原），直接關閉
+    if (!isRestoring && trimmed === (selectedDevice.device_name_custom?.trim() ?? "")) {
+      setEditingName(false);
+      return;
+    }
+
+    // 還原時寫 null，否則寫新名稱
+    const newCustomValue: string | null = isRestoring ? null : trimmed;
+
     try {
       // 更新自己的 row（只寫 device_name_custom）
       const { error: e1 } = await supabase
         .from("device_credentials")
-        .update({ device_name_custom: trimmed })
+        .update({ device_name_custom: newCustomValue })
         .eq("id", selectedDevice.id);
       if (e1) throw e1;
 
@@ -471,7 +519,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       if (!selectedDevice.share_from) {
         await supabase
           .from("device_credentials")
-          .update({ device_name_custom: trimmed })
+          .update({ device_name_custom: newCustomValue })
           .eq("share_from", email)
           .eq("device_name", selectedDevice.device_name)
           .eq("mqtt_user", selectedDevice.mqtt_user ?? "");
@@ -484,11 +532,11 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
           d.share_from === email &&
           d.device_name === selectedDevice.device_name &&
           d.mqtt_user  === selectedDevice.mqtt_user)
-          ? { ...d, device_name_custom: trimmed }
+          ? { ...d, device_name_custom: newCustomValue }
           : d
       );
       setDevices(upd);
-      setSelectedDevice({ ...selectedDevice, device_name_custom: trimmed });
+      setSelectedDevice({ ...selectedDevice, device_name_custom: newCustomValue });
       setEditingName(false);
     } catch (err: any) {
       alert("改名失敗：" + (err.message || err));
@@ -664,7 +712,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
                       if (e.key === "Escape") setEditingName(false);
                     }}
                     className="flex-1 bg-slate-800 border border-blue-500 text-white text-sm rounded-lg px-3 py-2 focus:outline-none"
-                    placeholder="輸入新名稱"
+                    placeholder={`原始：${selectedDevice.device_name_initial?.trim() || selectedDevice.device_name?.trim() || ""}（清空可還原）`}
                   />
                   <button onClick={handleRenameDevice}
                     className="px-3 py-2 bg-blue-600 text-white text-xs rounded-lg active:bg-blue-700 font-medium">
