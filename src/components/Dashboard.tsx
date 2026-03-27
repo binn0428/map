@@ -95,12 +95,9 @@ function displayName(d: DeviceCredential | null): string {
 const MAX_SHARES = 5;
 const DEFAULT_CENTER: [number, number] = [22.6273, 120.3014];
 
-/* ─── MQTT 伺服器對照表（初始為空，從 DB 載入）─── */
-// DB 資料表：mqtt_servers ( server_no int PK, broker_url text )
-// 靜態 fallback：若 DB 尚未建立，使用此預設值
-const MQTT_FALLBACK: Record<number, string> = {
-  1: "wss://8141bbadc4214f9d9f30e7822bd41522.s1.eu.hivemq.cloud:8884/mqtt",
-};
+/* ─── MQTT 伺服器對照表（從 DB 的 mqtt_list 載入，不寫死）─── */
+// mqtt_list 是全局設定表，不需以 user_id 篩選
+const MQTT_FALLBACK: Record<number, string> = {}; // DB 載入前暫為空
 
 /** 依 device 的 server_no 從傳入的 mqttList 取得 Broker URL；找不到時回傳 null */
 function getBrokerUrl(
@@ -226,23 +223,26 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   /* ── 從 DB 載入 MQTT 伺服器清單 ──────────────────────────────────────
      資料表：mqtt_list ( id, user_id, server_no int, url text )
-     邏輯：取出 user_id = email 的所有列，以 server_no 為 key 建立對照表
-     若查詢失敗或無資料，保留 MQTT_FALLBACK 靜態值。                  */
+     mqtt_list 為全局伺服器設定，直接讀全表，不以 user_id 篩選。
+     device_credentials.server_no 比對 mqtt_list.server_no → 取 url。  */
   useEffect(() => {
     supabase
       .from("mqtt_list")
       .select("server_no, url")
-      .eq("user_id", email)
       .then(({ data, error }) => {
         if (error) { console.error("[mqtt_list]", error); return; }
-        if (!data || data.length === 0) return; // 保留 fallback
-        const map: Record<number, string> = { ...MQTT_FALLBACK };
+        if (!data || data.length === 0) {
+          console.warn("[mqtt_list] 無資料，請確認資料表內容");
+          return;
+        }
+        const map: Record<number, string> = {};
         data.forEach((row: { server_no: number; url: string }) => {
           if (row.server_no != null && row.url) map[row.server_no] = row.url;
         });
+        console.log("[mqtt_list] 載入成功:", map);
         setMqttList(map);
       });
-  }, [email]);
+  }, []);
 
   /* ── 開啟頁面自動 GPS 定位 ── */
   useEffect(() => {
@@ -268,6 +268,8 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   useEffect(() => {
     if (!mqttUser || !mqttPass) return;
+    // mqttList 尚未從 DB 載入完成時，等待下一次 re-render（mqttList 在 deps 內）
+    if (Object.keys(mqttList).length === 0) return;
 
     // 依 device 的 server_no 從 mqttList 取得對應 Broker URL
     const brokerUrl = getBrokerUrl(selectedDevice, mqttList);
