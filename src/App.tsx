@@ -4,6 +4,39 @@ import LoginScreen from "./components/LoginScreen";
 import Dashboard from "./components/Dashboard";
 import { supabase } from "./utils/supabaseClient";
 
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
+          <div className="max-w-md w-full bg-slate-900 border border-red-500/50 rounded-2xl p-6 shadow-2xl">
+            <div className="flex items-center gap-3 text-red-500 mb-4">
+              <AlertCircle className="w-8 h-8" />
+              <h2 className="text-xl font-bold">頁面發生錯誤</h2>
+            </div>
+            <p className="text-slate-300 mb-4">
+              請重新整理頁面；若仍發生，請清除本站快取/Service Worker 後再試。
+            </p>
+            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 font-mono text-xs text-slate-400 overflow-x-auto">
+              {this.state.error.message}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userEmail, setUserEmail]   = useState<string>("");
@@ -65,18 +98,22 @@ export default function App() {
   );
 
   if (!isLoggedIn) return (
-    <LoginScreen onLogin={(email) => { setIsLoggedIn(true); setUserEmail(email); }} />
+    <ErrorBoundary>
+      <LoginScreen onLogin={(email) => { setIsLoggedIn(true); setUserEmail(email); }} />
+    </ErrorBoundary>
   );
 
   return (
-    <Dashboard
-      email={userEmail}
-      onLogout={() => {
-        localStorage.removeItem("rememberMe");
-        localStorage.removeItem("savedEmail");
-        setIsLoggedIn(false);
-        setUserEmail("");
-      }}
-    />
+    <ErrorBoundary>
+      <Dashboard
+        email={userEmail}
+        onLogout={() => {
+          localStorage.removeItem("rememberMe");
+          localStorage.removeItem("savedEmail");
+          setIsLoggedIn(false);
+          setUserEmail("");
+        }}
+      />
+    </ErrorBoundary>
   );
 }
