@@ -99,17 +99,24 @@ const DEFAULT_CENTER: [number, number] = [22.6273, 120.3014];
 // mqtt_list 是全局設定表，不需以 user_id 篩選
 const MQTT_FALLBACK: Record<number, string> = {}; // DB 載入前暫為空
 
-/** 依 device 的 server_no 從傳入的 mqttList 取得 Broker URL；找不到時回傳 null */
+/** 依 device 的 server_no 從傳入的 mqttList 取得 Broker URL；找不到時回傳 null
+ *  mqtt_list.url 可以是完整 URL 或純 hostname，本函式統一補齊格式：
+ *    hostname only  → wss://<hostname>:8884/mqtt
+ *    已有 protocol  → 原樣使用                                          */
 function getBrokerUrl(
   device: DeviceCredential | null,
   mqttList: Record<number, string>
 ): string | null {
   if (!device) return null;
-  // server_no 為 null / undefined / 0 時一律 fallback 到 1
   const no: number = (device.server_no != null && device.server_no > 0)
     ? device.server_no
     : 1;
-  return mqttList[no] ?? null;
+  const raw = mqttList[no];
+  if (!raw) return null;
+  // 已有 protocol（wss:// 或 ws://）→ 直接使用
+  if (/^wss?:\/\//i.test(raw)) return raw;
+  // 純 hostname → 補齊成完整 WSS URL
+  return `wss://${raw}:8884/mqtt`;
 }
 
 export default function Dashboard({ email, onLogout }: { email: string; onLogout: () => void }) {
