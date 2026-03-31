@@ -439,6 +439,7 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             device_name: selectedDevice.device_name,
             mqtt_user:   selectedDevice.mqtt_user,
             mqtt_pass:   selectedDevice.mqtt_pass,
+            server_no:   selectedDevice.server_no ?? null,
             share_from:  email,
             count:       currentCount - 1,
           });
