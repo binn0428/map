@@ -147,6 +147,18 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
 
   // 手動控制按壓提示
   const [triggeredAction, setTriggeredAction] = useState<string | null>(null);
+  // 觸發 toast 訊息
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  // 按鈕自訂名稱（key = action，存 localStorage）
+  const [btnLabels, setBtnLabels] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem("btnLabels") || "{}"); }
+    catch { return {}; }
+  });
+  // 長按改名 modal
+  const [editingBtn, setEditingBtn]   = useState<string | null>(null); // action key
+  const [editBtnName, setEditBtnName] = useState("");
+  const longPressTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 地點命名
   const [showNameModal, setShowNameModal] = useState(false);
@@ -326,9 +338,37 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
       `device/${selectedDevice.mqtt_user}/${selectedDevice.device_name}/command`,
       JSON.stringify({ action, pin, ts: Math.floor(Date.now() / 1000) })
     );
-    // 按壓提示動畫
+    // 按壓動畫
     setTriggeredAction(action);
     setTimeout(() => setTriggeredAction(null), 1200);
+    // 震動提示（短震）
+    if (navigator.vibrate) navigator.vibrate([40, 30, 40]);
+    // Toast 提示
+    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
+    const label = btnLabels[action] || defaultLabels[action] || action;
+    setToastMsg(`已觸發「${label}」`);
+    setTimeout(() => setToastMsg(null), 2500);
+  };
+
+  /* ── 按鈕長按改名 ── */
+  const handleBtnLongPress = (action: string) => {
+    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
+    setEditBtnName(btnLabels[action] || defaultLabels[action] || "");
+    setEditingBtn(action);
+  };
+  const confirmBtnRename = () => {
+    if (!editingBtn) return;
+    const defaultLabels: Record<string, string> = { open: "開", stop: "停", down: "關" };
+    const trimmed = editBtnName.trim();
+    const updated = { ...btnLabels };
+    if (!trimmed || trimmed === defaultLabels[editingBtn]) {
+      delete updated[editingBtn]; // 清空 = 還原預設
+    } else {
+      updated[editingBtn] = trimmed;
+    }
+    setBtnLabels(updated);
+    try { localStorage.setItem("btnLabels", JSON.stringify(updated)); } catch {}
+    setEditingBtn(null);
   };
 
   /* ── 手動 GPS ── */
@@ -796,22 +836,62 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
             <p className="text-xs text-slate-500 mb-1.5 px-0.5">手動控制</p>
             <div className="grid grid-cols-3 gap-2">
               {[
-                { action:"open", label:"開",
-                  base:"border-blue-500 text-blue-400",
-                  pressed:"bg-blue-500 text-white border-blue-400 scale-95 shadow-lg shadow-blue-500/40" },
-                { action:"stop", label:"停",
-                  base:"border-red-500 text-red-400",
-                  pressed:"bg-red-500 text-white border-red-400 scale-95 shadow-lg shadow-red-500/40" },
-                { action:"down", label:"關",
-                  base:"border-slate-600 text-slate-300",
-                  pressed:"bg-slate-600 text-white border-slate-500 scale-95 shadow-lg shadow-slate-500/30" },
-              ].map(({ action, label, base, pressed }) => {
+                { action:"open",
+                  defaultLabel:"開",
+                  baseColor:"border-blue-500 text-blue-400",
+                  pressedColor:"bg-blue-500/90 text-white border-blue-400",
+                  glowColor:"shadow-blue-500/50" },
+                { action:"stop",
+                  defaultLabel:"停",
+                  baseColor:"border-red-500 text-red-400",
+                  pressedColor:"bg-red-500/90 text-white border-red-400",
+                  glowColor:"shadow-red-500/50" },
+                { action:"down",
+                  defaultLabel:"關",
+                  baseColor:"border-slate-600 text-slate-300",
+                  pressedColor:"bg-slate-500/90 text-white border-slate-400",
+                  glowColor:"shadow-slate-500/40" },
+              ].map(({ action, defaultLabel, baseColor, pressedColor, glowColor }) => {
                 const isPressed = triggeredAction === action;
+                const label = btnLabels[action] || defaultLabel;
+                // 字數越多字體越小
+                const fontSize = label.length <= 2 ? "1.125rem"
+                               : label.length <= 4 ? "0.9rem"
+                               : label.length <= 6 ? "0.75rem"
+                               : "0.65rem";
                 return (
-                  <button key={action} onClick={() => handleControl(action)}
-                    style={{ transition: "transform 0.1s, box-shadow 0.15s, background-color 0.15s" }}
-                    className={`py-3 md:py-4 rounded-xl border font-bold text-lg bg-slate-900
-                      ${isPressed ? pressed : base} active:scale-95`}>
+                  <button
+                    key={action}
+                    onPointerDown={() => {
+                      longPressTimer.current = setTimeout(() => handleBtnLongPress(action), 600);
+                    }}
+                    onPointerUp={() => {
+                      if (longPressTimer.current) {
+                        clearTimeout(longPressTimer.current);
+                        longPressTimer.current = null;
+                      }
+                    }}
+                    onPointerLeave={() => {
+                      if (longPressTimer.current) {
+                        clearTimeout(longPressTimer.current);
+                        longPressTimer.current = null;
+                      }
+                    }}
+                    onClick={() => handleControl(action)}
+                    style={{
+                      transition: "transform 0.1s ease, box-shadow 0.15s ease, background-color 0.12s ease",
+                      fontSize,
+                    }}
+                    className={`
+                      py-3 md:py-4 rounded-xl border-2 font-bold bg-slate-900
+                      flex items-center justify-center text-center
+                      leading-tight px-1 break-words min-h-[56px]
+                      select-none
+                      ${isPressed
+                        ? `${pressedColor} scale-95 shadow-lg ${glowColor}`
+                        : `${baseColor} active:scale-95`}
+                    `}
+                  >
                     {isPressed ? "✓" : label}
                   </button>
                 );
@@ -1209,6 +1289,63 @@ export default function Dashboard({ email, onLogout }: { email: string; onLogout
               </div>
             </div>
           </div>
+        </PortalModal>
+      )}
+
+      {/* ══ 長按改名 Modal ══ */}
+      {editingBtn && (
+        <PortalModal>
+          <div className="fixed inset-0 bg-black/70 flex items-end justify-center" style={{ zIndex: 99999 }}
+            onClick={() => setEditingBtn(null)}>
+            <div className="bg-slate-900 border-t border-blue-500/40 rounded-t-2xl p-5 w-full max-w-lg"
+              onClick={(e) => e.stopPropagation()}>
+              <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto mb-3" />
+              <h3 className="text-sm font-bold mb-1">更改按鈕名稱</h3>
+              <p className="text-xs text-slate-500 mb-3">清空可還原預設名稱</p>
+              <input
+                type="text"
+                value={editBtnName}
+                onChange={(e) => setEditBtnName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && confirmBtnRename()}
+                maxLength={12}
+                placeholder="輸入按鈕名稱"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500 mb-3"
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button onClick={() => setEditingBtn(null)}
+                  className="flex-1 py-2.5 rounded-xl border border-slate-600 text-slate-300 text-sm font-medium active:bg-slate-800">
+                  取消
+                </button>
+                <button onClick={confirmBtnRename}
+                  className="flex-1 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-bold active:bg-blue-700">
+                  確認
+                </button>
+              </div>
+            </div>
+          </div>
+        </PortalModal>
+      )}
+
+      {/* ══ Toast 觸發提示 ══ */}
+      {toastMsg && (
+        <PortalModal>
+          <div
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[999999] pointer-events-none"
+            style={{ animation: "toastIn 0.2s ease" }}
+          >
+            <div className="bg-slate-800/95 border border-slate-600 text-white text-sm font-semibold
+              px-5 py-3 rounded-2xl shadow-xl flex items-center gap-2 whitespace-nowrap">
+              <span className="text-green-400 text-base">✓</span>
+              {toastMsg}
+            </div>
+          </div>
+          <style>{`
+            @keyframes toastIn {
+              from { opacity: 0; transform: translate(-50%, 16px); }
+              to   { opacity: 1; transform: translate(-50%, 0); }
+            }
+          `}</style>
         </PortalModal>
       )}
     </div>
